@@ -3,10 +3,8 @@
 Android viewfinder for a Canon PowerShot SX130 IS running CHDK, over USB (OTG) using CHDK's PTP extension.
 
 ## Status
-Milestone 1: connect, open a PTP session, query CHDK `Version`, request one live view frame, log its
-header (`fb_type`, dimensions, offsets) and save the raw blob to `lv.bin`.
-
-Next: colour decode, CHDK overlay, focus peaking, render loop.
+- Milestone 1 (done): USB PTP connect, `OpenSession`, CHDK `Version`, automatic `switch_mode_usb(1)` into shooting mode, and live view frame capture.
+- Milestone 2 (done): continuous `GetDisplayData` render loop with `LV_FB_YUV8` (`UYVYYY`) colour decode, 4:3/16:9/3:2 aspect scaling, toggleable CHDK OSD overlay (`LV_FB_PAL8`), and luma focus peaking.
 
 ## Build
 Push to GitHub; the Actions workflow builds a debug APK. Download it from the run's artifacts.

@@ -19,6 +19,7 @@ class Ptp(
 ) {
     // PTP spec (§10.5.3): OpenSession uses Transaction_ID = 0; subsequent commands increment from 1.
     private var tid = 0
+    private val readBuf = ByteArray(BULK_CHUNK_SIZE)
 
     private fun le32(v: Int) =
         byteArrayOf(v.toByte(), (v shr 8).toByte(), (v shr 16).toByte(), (v shr 24).toByte())
@@ -58,9 +59,8 @@ class Ptp(
 
     /** Drain any leftover bytes sitting in the camera's Bulk IN buffer (e.g. from aborted MTP). */
     private fun drainInEndpoint() {
-        val tmp = ByteArray(BULK_CHUNK_SIZE)
         for (i in 0 until 4) {
-            val n = conn.bulkTransfer(inEp, tmp, tmp.size, 150)
+            val n = conn.bulkTransfer(inEp, readBuf, readBuf.size, 150)
             if (n <= 0) break
             log("  drained $n stale bytes from IN ep")
         }
@@ -137,7 +137,7 @@ class Ptp(
                 }
             }
 
-            val buf = ByteArray(BULK_CHUNK_SIZE)
+            val buf = readBuf
             var data = ByteArray(0)
             var surplus = ByteArray(0)
             var failed = false
