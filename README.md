@@ -12,8 +12,10 @@ Next: colour decode, CHDK overlay, focus peaking, render loop.
 Push to GitHub; the Actions workflow builds a debug APK. Download it from the run's artifacts.
 
 ## Notes
-CHDK PTP subcommand numbers have been verified against CHDK's `ptp.h`:
-- `PTP_CHDK_Version` = 0, `PTP_CHDK_GetDisplayData` = 10 (0x0A).
-- `LV_TFR` flags: viewport=1, bitmap=4, palette=8 (from `liveview.h`).
-Camera must be in shooting mode with the lens out.
+CHDK PTP subcommand numbers verified against CHDK's `ptp.h`:
+- `PTP_CHDK_Version` = 0
+- `PTP_CHDK_ExecuteScript` = 7 (used to run `switch_mode_usb(1)` if USB connect switched to playback)
+- `PTP_CHDK_ScriptStatus` = 8, `PTP_CHDK_ReadScriptMsg` = 10
+- `PTP_CHDK_GetDisplayData` = 12 (0x0C)
+- `LV_TFR` flags: viewport=1, bitmap=4, palette=8 (from `live_view.h`).
 
