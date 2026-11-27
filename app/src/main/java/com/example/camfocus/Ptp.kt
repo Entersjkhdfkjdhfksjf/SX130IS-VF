@@ -247,6 +247,9 @@ class Ptp(
     fun closeSession() = transact(0x1003)
     fun chdk(sub: Int, vararg p: Int) = transact(0x9999, sub, *p)
 
+    /** Read [size] bytes from camera RAM at [addr] via PTP_CHDK_GetMemory (sub=1). */
+    fun chdkGetMemory(addr: Int, size: Int): PtpResult = chdk(1, addr, size)
+
     /** Execute a Lua script on camera via PTP_CHDK_ExecuteScript (sub=7, SL_LUA=0). */
     fun chdkExecLua(script: String, flags: Int = 0): PtpResult {
         val bytes = script.toByteArray(Charsets.UTF_8) + byteArrayOf(0)

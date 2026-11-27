@@ -43,7 +43,8 @@ class LvDecoder {
         frame: LvFrame,
         showOverlay: Boolean,
         focusPeaking: Boolean,
-        peakingThreshold: Int = 75
+        peakingThreshold: Int = 75,
+        overridePalette: ByteArray? = null
     ): DecodedPixels? {
         val vp = frame.vp
         if (vp.dataStart <= 0 || vp.visW <= 0 || vp.visH <= 0) return null
@@ -129,7 +130,7 @@ class LvDecoder {
         }
 
         if (showOverlay) {
-            blendBitmapOverlay(frame, w, h)
+            blendBitmapOverlay(frame, w, h, overridePalette)
         }
 
         val aspectRatio = when (frame.lcdAspectRatio) {
@@ -156,14 +157,14 @@ class LvDecoder {
         }
     }
 
-    private fun blendBitmapOverlay(frame: LvFrame, dstW: Int, dstH: Int) {
+    private fun blendBitmapOverlay(frame: LvFrame, dstW: Int, dstH: Int, overridePalette: ByteArray?) {
         val bm = frame.bm
         if (bm.type != 1 || bm.dataStart <= 0 || bm.visW <= 0 || bm.visH <= 0) return
         val blob = frame.blob
         val needed = bm.dataStart + (bm.visH - 1) * bm.bufW + bm.visW
         if (needed > blob.size) return
 
-        buildPalette(frame)
+        buildPalette(frame, overridePalette)
 
         val bmW = bm.visW
         val bmH = bm.visH
@@ -192,27 +193,34 @@ class LvDecoder {
         }
     }
 
-    private fun buildPalette(frame: LvFrame) {
+    private fun buildPalette(frame: LvFrame, overridePalette: ByteArray?) {
         val blob = frame.blob
         val pType = frame.paletteType
         val pStart = frame.paletteStart
-        val palBytes: ByteArray
-        val base: Int
-        val effType: Int
-
         val neededEntries = when (pType) {
             1, 2, 4 -> 16
             3, 5 -> 256
             else -> 0
         }
-        if (neededEntries == 0 || pStart <= 0 || pStart + neededEntries * 4 > blob.size) {
-            palBytes = PALETTE_TYPE1_DEFAULT
-            base = 0
-            effType = 1
-        } else {
+
+        val palBytes: ByteArray
+        val base: Int
+        val effType: Int
+        if (neededEntries > 0 && pStart > 0 && pStart + neededEntries * 4 <= blob.size) {
             palBytes = blob
             base = pStart
             effType = pType
+        } else if (overridePalette != null && overridePalette.size >= 1024) {
+            palBytes = overridePalette
+            base = 0
+            effType = 3
+        } else if (frame.bm.visW >= 720) {
+            fillSx130FallbackPalette()
+            return
+        } else {
+            palBytes = PALETTE_TYPE1_DEFAULT
+            base = 0
+            effType = 1
         }
 
         for (pixel in 0 until 256) {
@@ -225,6 +233,30 @@ class LvDecoder {
                 else -> 0
             }
         }
+    }
+
+    /** Clean fallback ARGB lookup for 8-bit 720px DIGIC 4 bitmaps if RAM palette is unavailable. */
+    private fun fillSx130FallbackPalette() {
+        palRgba.fill(0xB0D8D8D8.toInt())
+        palRgba[0x00] = 0x00000000
+        palRgba[0x01] = 0xFFFFFFFF.toInt()
+        palRgba[0x10] = 0xFFD0D8E0.toInt()
+        palRgba[0x14] = 0xFF002080.toInt()
+        palRgba[0x19] = 0xFF404040.toInt()
+        palRgba[0x1A] = 0xFF808080.toInt()
+        palRgba[0x1E] = 0xFFE000E0.toInt()
+        palRgba[0x45] = 0xFFFFB000.toInt()
+        palRgba[0x60] = 0xFFFFFF00.toInt()
+        palRgba[0x61] = 0xFF0070FF.toInt()
+        palRgba[0x66] = 0xFFFF2020.toInt()
+        palRgba[0x69] = 0xFF00E0E0.toInt()
+        palRgba[0x6A] = 0xFFFFFF00.toInt()
+        palRgba[0x6B] = 0xFF00E040.toInt()
+        palRgba[0x6C] = 0xFF2080FF.toInt()
+        palRgba[0xA0] = 0xFFFF2020.toInt()
+        palRgba[0xA1] = 0xFF00E040.toInt()
+        palRgba[0xA2] = 0xFF0070FF.toInt()
+        palRgba[0xFF] = 0xFF000000.toInt()
     }
 
     // AYUV: [a, y, u, v]

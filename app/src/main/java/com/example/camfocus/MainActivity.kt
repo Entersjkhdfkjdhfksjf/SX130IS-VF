@@ -24,7 +24,17 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
-    private val ACTION_PERM = "com.example.camfocus.USB_PERM"
+    companion object {
+        private const val ACTION_PERM = "com.example.camfocus.USB_PERM"
+        private const val CANON_VID = 0x04A9
+        private const val SX130_PID = 0x3211
+        // Verified identical across SX130 IS firmware 101c / 101d / 101f in CHDK stubs_entry.S + lib.c
+        private const val SX130_ACTIVE_PALETTE_ADDR = 0x00009460
+        private const val SX130_PALETTE_BUFFER_ADDR = 0x000B3A58
+        private const val SX130_PALETTE_OFFSET = 8
+        private const val PALETTE_TYPE3_SIZE = 256 * 4
+    }
+
     private lateinit var usb: UsbManager
     private lateinit var viewfinder: ViewfinderView
     private lateinit var log: TextView
@@ -282,7 +292,10 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            ensureRecordMode(p)
+            val platform = ensureRecordMode(p)
+            val useSx130RamPalette =
+                (platform == "sx130is") ||
+                (platform == null && dev.vendorId == CANON_VID && dev.productId == SX130_PID)
 
             val decoder = LvDecoder()
             var frames = 0
@@ -290,6 +303,9 @@ class MainActivity : AppCompatActivity() {
             var fpsWindowStart = System.currentTimeMillis()
             var fpsText = "--"
             var consecutiveErrors = 0
+            var cachedPalette: ByteArray? = null
+            var lastPalFetchMs = 0L
+            var loggedPalAddr = Int.MIN_VALUE
 
             while (streaming) {
                 val flags = if (showOverlay) (0x01 or 0x04 or 0x08) else 0x01
@@ -306,7 +322,26 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val frame = LvFrame(lv.data)
-                    val decoded = decoder.decode(frame, showOverlay, focusPeaking)
+                    if (showOverlay && useSx130RamPalette && frame.paletteType == 0 && frame.bm.dataStart > 0) {
+                        val nowPal = System.currentTimeMillis()
+                        if (cachedPalette == null || nowPal - lastPalFetchMs >= 750L) {
+                            lastPalFetchMs = nowPal
+                            val palResult = fetchSx130Palette(p)
+                            if (palResult != null) {
+                                cachedPalette = palResult.second
+                                if (palResult.first != loggedPalAddr) {
+                                    loggedPalAddr = palResult.first
+                                    say("Loaded SX130 live palette @ 0x%08X".format(palResult.first))
+                                }
+                            }
+                        }
+                    }
+                    val decoded = decoder.decode(
+                        frame,
+                        showOverlay,
+                        focusPeaking,
+                        overridePalette = if (frame.paletteType == 0) cachedPalette else null
+                    )
                     if (decoded != null) {
                         consecutiveErrors = 0
                         frames++
@@ -359,37 +394,77 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Switch the camera back to Record (shooting) mode over USB via CHDK's
-     * PTP_CHDK_ExecuteScript (subcommand 7, SL_LUA = 0).
+     * PTP_CHDK_ExecuteScript (subcommand 7, SL_LUA = 0) and return the CHDK platform name.
      */
-    private fun ensureRecordMode(ptp: Ptp) {
+    private fun ensureRecordMode(ptp: Ptp): String? {
+        var platform: String? = null
         try {
             say("Ensuring camera is in shooting mode…")
-            val script = "if not get_mode() then switch_mode_usb(1) repeat sleep(50) until get_mode() end"
+            val script = "if not get_mode() then switch_mode_usb(1) repeat sleep(50) until get_mode() end\nreturn get_buildinfo().platform"
             val res = ptp.chdkExecLua(script)
             say("ExecuteScript resp=0x%04X params=%s".format(res.code, res.params.joinToString()))
-            if (res.code != Ptp.RC_OK) return
+            if (res.code != Ptp.RC_OK) return null
 
             val deadline = System.currentTimeMillis() + 6000
             while (streaming && System.currentTimeMillis() < deadline) {
-                val st = ptp.chdk(8) // PTP_CHDK_ScriptStatus
-                val flags = st.params.getOrElse(0) { 0 }
-                if ((flags and 0x2) != 0) {
+                var st = ptp.chdk(8) // PTP_CHDK_ScriptStatus
+                var flags = st.params.getOrElse(0) { 0 }
+                var drained = 0
+                while ((flags and 0x2) != 0 && drained < 8) {
                     val msg = ptp.chdk(10) // PTP_CHDK_ReadScriptMsg
                     val msgType = msg.params.getOrElse(0) { 0 }
                     val txt = String(msg.data, Charsets.UTF_8).trimEnd('\u0000')
-                    if (txt.isNotEmpty() || msgType == 1) {
+                    if (msgType == 2 && txt.isNotEmpty()) { // PTP_CHDK_S_MSG_TYPE_RET
+                        platform = txt
+                        say("Camera platform: $txt")
+                    } else if (txt.isNotEmpty() || msgType == 1) {
                         say("Script msg(type=$msgType): $txt")
                     }
+                    drained++
+                    st = ptp.chdk(8)
+                    flags = st.params.getOrElse(0) { 0 }
                 }
                 if ((flags and 0x1) == 0) {
                     say("Camera in shooting mode ✓")
                     Thread.sleep(300)
-                    return
+                    return platform
                 }
                 Thread.sleep(150)
             }
         } catch (e: Exception) {
             say("Mode switch failed: ${e.message}")
         }
+        return platform
     }
+
+    /**
+     * Reads Canon SX130 IS's active 256-entry VUYA palette directly from RAM when CHDK
+     * builds omit CAM_CHDK_PTP_LIVE_VIEW and GetDisplayData reports palette_type=0.
+     */
+    private fun fetchSx130Palette(ptp: Ptp): Pair<Int, ByteArray>? {
+        return try {
+            val actRes = ptp.chdkGetMemory(SX130_ACTIVE_PALETTE_ADDR, 4)
+            if (actRes.code != Ptp.RC_OK || actRes.data.size < 4) return null
+            val activeIdx = readLe32(actRes.data)
+            if (activeIdx !in 0..15) return null
+
+            val ptrRes = ptp.chdkGetMemory(SX130_PALETTE_BUFFER_ADDR + activeIdx * 4, 4)
+            if (ptrRes.code != Ptp.RC_OK || ptrRes.data.size < 4) return null
+            val palPtr = readLe32(ptrRes.data)
+            if ((palPtr and 3) != 0 || palPtr < 0x10000 || palPtr > 0x04000000) return null
+
+            val palAddr = palPtr + SX130_PALETTE_OFFSET
+            val palRes = ptp.chdkGetMemory(palAddr, PALETTE_TYPE3_SIZE)
+            if (palRes.code != Ptp.RC_OK || palRes.data.size < PALETTE_TYPE3_SIZE) return null
+            palAddr to palRes.data
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun readLe32(b: ByteArray, off: Int = 0): Int =
+        (b[off].toInt() and 0xFF) or
+            ((b[off + 1].toInt() and 0xFF) shl 8) or
+            ((b[off + 2].toInt() and 0xFF) shl 16) or
+            ((b[off + 3].toInt() and 0xFF) shl 24)
 }
