@@ -50,12 +50,11 @@ class Ptp(
 
         var lastError = ""
         for (attempt in 0..MAX_RETRIES) {
-            if (attempt > 0) {
-                // Clear possible stall on both endpoints before retry
-                clearHalt(outEp)
-                clearHalt(inEp)
-                Thread.sleep(100)
-            }
+            // Always clear possible stall on both endpoints (MTP detach can
+            // leave them stalled, and a failed prior attempt definitely does)
+            clearHalt(outEp)
+            clearHalt(inEp)
+            if (attempt > 0) Thread.sleep(200)
 
             val written = conn.bulkTransfer(outEp, pkt, pkt.size, WRITE_TIMEOUT_MS)
             if (written < 0) {

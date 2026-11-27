@@ -84,30 +84,93 @@ class MainActivity : AppCompatActivity() {
     private fun say(t: String) = runOnUiThread { log.append(t + "\n") }
 
     /**
-     * Reset the USB device to tear down any MTP session that Android's
-     * media stack may have already opened, then re-claim for PTP/CHDK use.
+     * Reclaim the USB device from Android's MTP host and reset the pipe state.
+     *
+     * Android's media stack grabs PTP cameras and opens its own session.
+     * claimInterface(force=true) detaches the kernel driver, but the endpoint
+     * data toggles can be out of sync, causing all bulk transfers to fail.
+     *
+     * We fix this with SET_INTERFACE(alt=0) which the USB spec guarantees
+     * resets the data toggles for all endpoints on that interface.
      */
     private fun resetAndClaim(dev: UsbDevice): Triple<UsbDeviceConnection, UsbInterface, Pair<UsbEndpoint, UsbEndpoint>> {
         val intf = (0 until dev.interfaceCount).map { dev.getInterface(it) }
             .first { it.interfaceClass == 6 /* Still Image / PTP */ }
 
-        val conn = usb.openDevice(dev)
+        // --- First open: steal from MTP kernel driver ---
+        var conn = usb.openDevice(dev)
             ?: throw IllegalStateException("openDevice returned null — permission lost?")
 
-        // Force-release from Android MTP host, then reset the device via
-        // SET_CONFIGURATION to tear down any existing PTP session.
-        conn.claimInterface(intf, true)       // force = true: steal from kernel/MTP
-        conn.setConfiguration(dev.getConfiguration(0))  // USB reset: re-enumerate config
-        conn.releaseInterface(intf)
-        Thread.sleep(300)                      // let the camera settle after reset
-
-        // Now re-claim cleanly
+        say("  claimInterface(force=true)…")
         conn.claimInterface(intf, true)
 
+        // SET_INTERFACE(alt=0) resets endpoint data toggles per USB 2.0 §9.4.10.
+        // This is the key step that fixes the broken pipe after MTP detach.
+        val setIntfResult = conn.controlTransfer(
+            UsbConstants.USB_TYPE_STANDARD or UsbConstants.USB_DIR_OUT
+                or 0x01 /* RECIPIENT_INTERFACE */,
+            11,                     /* bRequest = SET_INTERFACE */
+            0,                      /* wValue   = alternate setting 0 */
+            intf.id,                /* wIndex   = interface number */
+            null, 0, 1000
+        )
+        say("  SET_INTERFACE → $setIntfResult")
+
+        // Clear any HALT / STALL on the endpoints
+        for (i in 0 until intf.endpointCount) {
+            val ep = intf.getEndpoint(i)
+            if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                val rc = conn.controlTransfer(
+                    UsbConstants.USB_TYPE_STANDARD or UsbConstants.USB_DIR_OUT
+                        or 0x02 /* RECIPIENT_ENDPOINT */,
+                    1,                 /* bRequest = CLEAR_FEATURE */
+                    0,                 /* wValue   = ENDPOINT_HALT */
+                    ep.address,        /* wIndex   = endpoint address */
+                    null, 0, 1000
+                )
+                say("  CLEAR_HALT ep=0x%02X → %d".format(ep.address, rc))
+            }
+        }
+
+        // If SET_INTERFACE failed, try the nuclear option: close + reopen
+        if (setIntfResult < 0) {
+            say("  SET_INTERFACE failed, trying close/reopen…")
+            conn.releaseInterface(intf)
+            conn.close()
+            Thread.sleep(500)
+            conn = usb.openDevice(dev)
+                ?: throw IllegalStateException("openDevice returned null on reopen")
+            conn.claimInterface(intf, true)
+            // Try SET_INTERFACE again after fresh open
+            conn.controlTransfer(
+                UsbConstants.USB_TYPE_STANDARD or UsbConstants.USB_DIR_OUT
+                    or 0x01,
+                11, 0, intf.id, null, 0, 1000
+            )
+            for (i in 0 until intf.endpointCount) {
+                val ep = intf.getEndpoint(i)
+                if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                    conn.controlTransfer(
+                        UsbConstants.USB_TYPE_STANDARD or UsbConstants.USB_DIR_OUT
+                            or 0x02,
+                        1, 0, ep.address, null, 0, 1000
+                    )
+                }
+            }
+        }
+
+        Thread.sleep(300) // let the camera settle
+
+        // Find bulk endpoints
         var inEp: UsbEndpoint? = null
         var outEp: UsbEndpoint? = null
         for (i in 0 until intf.endpointCount) {
             val e = intf.getEndpoint(i)
+            say("  ep[$i] addr=0x%02X type=%d dir=%s maxPkt=%d".format(
+                e.address, e.type,
+                if (e.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT",
+                e.maxPacketSize
+            ))
             if (e.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
                 if (e.direction == UsbConstants.USB_DIR_IN) inEp = e else outEp = e
             }
